@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stream-pipeline-lab</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f7f7f5;--fg:#1c1c1a;--mut:#6b6b66;--card:#fff;--line:#dcdcd6;--ok:#1b7f4b;--late:#9a6700;--drop:#b3261e;--link:#3b6fd4;--bar:#3b6fd4}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#ecece8;--mut:#9a9a94;--card:#1d1d1b;--line:#333330;--ok:#3fb97a;--late:#e5a824;--drop:#e06666;--link:#6d9bf0;--bar:#6d9bf0}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:26px 0 8px}p{margin:6px 0}.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:3px 8px;border-bottom:1px solid var(--line);text-align:left}
+.pill{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;font-weight:600;border:1px solid currentColor}
+.ok{color:var(--ok)}.late{color:var(--late)}.drop{color:var(--drop)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.step{padding:5px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.scroll{max-height:360px;overflow:auto}
+pre{margin:0;font:12.5px/1.45 ui-monospace,Menlo,monospace;overflow-x:auto}
+.bar{display:inline-block;height:9px;background:var(--bar);border-radius:3px;vertical-align:middle;margin-right:6px}
+a{color:var(--link)}code{font:13px ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+<main>
+<h1>stream-pipeline-lab</h1>
+<p class="mut">One Apache Beam pipeline definition, run as a batch job on two runners (Beam DirectRunner and a local Apache Flink) and as a streaming job with late data on a test stream. Everything below is output recorded by <code>lab.Report</code>. Personal learning project; local single-JVM runs only, no cluster and no load test.</p>
+
+<h2>Same pipeline, two runners</h2>
+<div class="card">
+  <p id="same"></p>
+  <div class="grid" style="margin-top:10px">
+    <div><p class="mut">Per-user, per-minute totals (event time windows, duplicates dropped)</p><div class="scroll"><table id="rows"></table></div></div>
+    <div><p class="mut">Total per user (sum of the windows on the left, from the Flink run)</p><table id="byuser"></table></div>
+  </div>
+</div>
+
+<h2>Late data in a streaming run</h2>
+<div class="card">
+  <p class="mut">Window: 1 minute fixed, event time. Allowed lateness: 2 minutes. Panes accumulate, so a late pane carries the running total.</p>
+  <div class="grid">
+    <div id="input"></div>
+    <div><p class="mut">Panes emitted for user ana, minute 0</p><div id="panes"></div>
+    <p class="mut" style="margin-top:10px">The +100 event arrived after the window closed and was dropped, so it appears in no pane.</p></div>
+  </div>
+</div>
+
+<h2>The windowing definition</h2>
+<div class="card"><pre>Window.&lt;Event&gt;into(FixedWindows.of(Duration.standardMinutes(1)))
+    .triggering(AfterWatermark.pastEndOfWindow()
+        .withLateFirings(AfterPane.elementCountAtLeast(1)))
+    .withAllowedLateness(Duration.standardMinutes(2))
+    .accumulatingFiredPanes()</pre></div>
+
+<h2>What I ran into</h2>
+<div class="card">
+<p><b>Beam's <code>Distinct</code> breaks event-time windowing</b> when it runs before windowing: it groups in the global window and re-stamps every element at the end of time, so all events collapsed into one window. Applied after a triggered window it would re-emit accumulated elements on each late pane. I replaced it with a per-id stateful step inside the window.</p>
+<p><b>Pane timing differs by runner.</b> Flink in batch mode left pane timing UNKNOWN where the DirectRunner reported ON_TIME, so the cross-runner check compares the data and not the pane label.</p>
+<p><b>The stateful dedupe step changed the on-time and late split on the DirectRunner:</b> the late event was folded into the on-time pane. With the step removed the panes split as expected, so the pane demo runs without it and dedupe is tested separately. I did not find out whether that is documented runner behavior or a flaw in my test.</p>
+<p><b>Not run:</b> Apache Spark, Kafka (see my kafka-ops-lab repo for Kafka), a real cluster, and timing comparisons. The first run in a JVM pays class loading, so the millisecond figures in the data file are not a benchmark.</p>
+</div>
+
+<h2>References</h2>
+<div class="card"><ul>
+<li>Apache Beam, <a href="https://beam.apache.org/documentation/programming-guide/">Programming Guide</a> (windowing, triggers, state and timers) and <a href="https://beam.apache.org/documentation/runners/capability-matrix/">runner capability matrix</a>, <a href="https://beam.apache.org/documentation/runners/flink/">Flink runner</a></li>
+<li>Apache Flink, <a href="https://nightlies.apache.org/flink/flink-docs-stable/">documentation</a>; Apache Spark, <a href="https://spark.apache.org/docs/latest/streaming/">streaming programming guide</a>; Apache Kafka, <a href="https://kafka.apache.org/documentation/">documentation</a></li>
+<li>Akidau et al., <a href="https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf">The Dataflow Model</a> (VLDB 2015), and Akidau, <a href="https://www.oreilly.com/radar/the-world-beyond-batch-streaming-101/">The world beyond batch: Streaming 101</a></li>
+<li>Beam blog, <a href="https://beam.apache.org/blog/stateful-processing/">Stateful processing with Apache Beam</a></li>
+</ul></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+fetch('data.json').then(r=>r.json()).then(d=>{
+  $('same').innerHTML='<b>'+d.events+' events ('+d.distinctIds+' distinct ids, '+(d.events-d.distinctIds)+' duplicate deliveries)</b> processed by the same <code>Pipelines.batchTotals</code> on both runners. Results identical: <span class="pill '+(d.identical?'ok':'drop')+'">'+(d.identical?'yes':'NO')+'</span> ('+d.direct.rows.length+' rows each)';
+  const strip=l=>l.slice(0,l.lastIndexOf('|'));
+  const fl=d.flink.rows.map(strip), di=d.direct.rows.map(strip);
+  $('rows').innerHTML='<tr><th>user</th><th>minute</th><th>sum</th><th>DirectRunner</th><th>Flink</th></tr>'+di.map((r,i)=>{const [u,m,s]=r.split('|');return '<tr><td>'+u+'</td><td>'+m+'</td><td>'+s+'</td><td class="ok">'+(di[i]===r?'=':'')+'</td><td class="'+(fl[i]===r?'ok':'drop')+'">'+(fl[i]===r?'=':fl[i])+'</td></tr>'}).join('');
+  const tot={};fl.forEach(r=>{const [u,,s]=r.split('|');tot[u]=(tot[u]||0)+ +s});
+  const mx=Math.max(...Object.values(tot));
+  $('byuser').innerHTML=Object.entries(tot).sort().map(([u,s])=>'<tr><td>'+u+'</td><td><span class="bar" style="width:'+Math.round(s/mx*160)+'px"></span>'+s+'</td></tr>').join('');
+  $('input').innerHTML='<p class="mut">What arrived, in order</p>'+d.streaming.input.map(x=>'<div class="step">'+x+'</div>').join('');
+  $('panes').innerHTML=d.streaming.panes.map(p=>{const f=p.split('|');return '<div class="step"><span class="pill '+(f[3]==='ON_TIME'?'ok':'late')+'">'+f[3]+'</span> sum = <b>'+f[2]+'</b></div>'}).join('');
+}).catch(()=>{document.querySelector('main p').textContent='Could not load data.json. Serve this folder over HTTP: python3 -m http.server -d docs'});
+</script>
+</body>
+</html>
